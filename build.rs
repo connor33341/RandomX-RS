@@ -3,12 +3,9 @@ use std::path::Path;
 
 fn main() {
     let target = env::var("TARGET").unwrap();
+    let out_dir = env::var("OUT_DIR").unwrap();
 
-    // Link against the C/C++ RandomX implementation during transition
-    println!("cargo:rustc-link-search=native=./src");
-    println!("cargo:rustc-link-lib=static=randomx");
-    
-    // Rebuild when these files change
+    // Make sure to rebuild when these files change
     println!("cargo:rerun-if-changed=src/randomx.h");
     println!("cargo:rerun-if-changed=src/randomx.cpp");
     println!("cargo:rerun-if-changed=build.rs");
@@ -40,12 +37,13 @@ fn main() {
         }
     }
     
-    // Compile C/C++ files
-    let mut native_sources = vec![
+    // Compile all C/C++ files
+    let mut sources = vec![
         "src/aes_hash.cpp",
         "src/allocator.cpp",
         "src/assembly_generator_x86.cpp",
         "src/blake2_generator.cpp",
+        "src/blake2/blake2b.c",
         "src/bytecode_machine.cpp",
         "src/cpu.cpp",
         "src/dataset.cpp",
@@ -67,26 +65,23 @@ fn main() {
 
     // Add platform-specific JIT compiler implementations
     if target.contains("x86_64") {
-        native_sources.push("src/jit_compiler_x86.cpp");
+        sources.push("src/jit_compiler_x86.cpp");
         
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
             
-            // For x86-64 Linux, we'll handle the assembly file separately
-            println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-            // Create a separate build for the assembly file only
+            // For x86-64 Linux, handle the assembly file separately
             let mut asm_config = cc::Build::new();
             asm_config
                 .file("src/jit_compiler_x86_static.S")
                 .flag("-fPIC")
                 .include("src");
             asm_config.compile("randomx_asm");
-            println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
         } else if target.contains("windows") {
             cc_config.define("XMRIG_OS_WIN", "1");
             
-            // For Windows, we need to compile the assembly file separately
+            // For Windows, compile the assembly file separately
             if target.contains("msvc") {
                 let mut asm_config = cc::Build::new();
                 asm_config.file("src/jit_compiler_x86_static.asm");
@@ -100,7 +95,7 @@ fn main() {
             }
         }
     } else if target.contains("aarch64") {
-        native_sources.push("src/jit_compiler_a64.cpp");
+        sources.push("src/jit_compiler_a64.cpp");
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
@@ -114,7 +109,7 @@ fn main() {
             asm_config.compile("randomx_asm");
         }
     } else if target.contains("riscv64") {
-        native_sources.push("src/jit_compiler_rv64.cpp");
+        sources.push("src/jit_compiler_rv64.cpp");
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
@@ -131,29 +126,46 @@ fn main() {
     
     // Add optimized Argon2 implementations if supported
     if target.contains("x86_64") || target.contains("i686") {
-        native_sources.push("src/argon2_ssse3.c");
+        sources.push("src/argon2_ssse3.c");
         if !target.contains("msvc") {
             cc_config.flag("-mssse3");
         }
         
-        native_sources.push("src/argon2_avx2.c");
+        sources.push("src/argon2_avx2.c");
         if !target.contains("msvc") {
             cc_config.flag("-mavx2");
         }
     }
     
-    // Compile all source files
-    cc_config.files(&native_sources);
-    cc_config.compile("randomx");
+    // Compile all the sources
+    cc_config.files(&sources);
+    
+    // Important - compile everything as a single unit to resolve linking issues
+    // This helps ensure all symbols are properly linked
+    cc_config.compile("randomx_all");
+    
+    // Make sure to link against C++ standard library
+    println!("cargo:rustc-link-lib=stdc++");
+    
+    // Link search paths
+    println!("cargo:rustc-link-search=native={}", out_dir);
+    println!("cargo:rustc-link-search=native=./src");
+    
+    // Link against our compiled libraries
+    println!("cargo:rustc-link-lib=static=randomx_all");
+    println!("cargo:rustc-link-lib=static=randomx_asm");
     
     // Generate Rust bindings to C/C++ code
     let bindings = bindgen::Builder::default()
         .header("src/randomx.h")
+        .clang_arg("-I./src")
+        .allowlist_function("randomx_.*")
+        .allowlist_type("randomx_.*")
+        .allowlist_var("RANDOMX_.*")
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         .generate()
         .expect("Unable to generate bindings");
 
-    let out_dir = env::var("OUT_DIR").unwrap();
     let out_path = Path::new(&out_dir);
     bindings
         .write_to_file(out_path.join("bindings.rs"))

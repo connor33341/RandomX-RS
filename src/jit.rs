@@ -29,7 +29,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::ffi::c_void;
 use std::ptr;
-use crate::{RandomXFlags, CPU};
+use crate::{RandomXFlags};
+use crate::cpu::CPU;
 
 // Platform-specific JIT implementations
 #[cfg(target_arch = "x86_64")]

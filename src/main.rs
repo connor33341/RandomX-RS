@@ -125,13 +125,10 @@ fn run_fast_mode_benchmark(nonces: usize, threads: usize, init_threads: usize) {
     let key = "RandomX example key";
     
     // Initialize cache
-    let cache = randomx_rs::alloc_cache(flags).expect("Failed to allocate cache");
-    let mut cache_mut = unsafe { std::mem::transmute::<&Cache, &mut Cache>(&cache) };
-    cache_mut.init(key.as_bytes());
+    let cache = randomx_rs::alloc_cache(flags.clone(), key.as_bytes()).expect("Failed to allocate cache");
     
     // Initialize dataset
-    let mut dataset = randomx_rs::alloc_dataset(flags).expect("Failed to allocate dataset");
-    dataset.init(&cache, 0, randomx_rs::dataset_item_count());
+    let dataset = randomx_rs::alloc_dataset(flags.clone(), Some(std::sync::Arc::new(cache.clone()))).expect("Failed to allocate dataset");
     
     // Create VM and compute a sample hash
     let vm = randomx_rs::create_vm(flags, None, Some(&dataset)).expect("Failed to create VM");
@@ -154,9 +151,7 @@ fn run_light_mode_benchmark(nonces: usize, threads: usize) {
     let key = "RandomX example key";
     
     // Initialize cache
-    let cache = randomx_rs::alloc_cache(flags).expect("Failed to allocate cache");
-    let mut cache_mut = unsafe { std::mem::transmute::<&Cache, &mut Cache>(&cache) };
-    cache_mut.init(key.as_bytes());
+    let cache = randomx_rs::alloc_cache(flags.clone(), key.as_bytes()).expect("Failed to allocate cache");
     
     // Create VM and compute a sample hash
     let vm = randomx_rs::create_vm(flags, Some(&cache), None).expect("Failed to create VM");

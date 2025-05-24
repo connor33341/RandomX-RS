@@ -175,7 +175,7 @@ pub fn execute_instruction(state: &mut MachineState, instr: &Instruction) -> boo
             let shift = instr.mod_() & 63;
             let dst = instr.dst() as usize;
             let src = instr.src() as usize;
-            state.r[dst] = state.r[dst].wrapping_add(state.r[src].rotate_left(shift));
+            state.r[dst] = state.r[dst].wrapping_add(state.r[src].rotate_left(shift.into()));
         }
         
         Iadd_m => {
@@ -441,7 +441,7 @@ pub fn execute_instruction(state: &mut MachineState, instr: &Instruction) -> boo
 
         Cbranch => {
             let dst = instr.dst() as usize;
-            let target = instr.imm() & BRANCH_COND_MASK;
+            let target = (instr.imm() as u32) & BRANCH_COND_MASK;
             let condition = ((instr.imm() as u32) >> 28) & 0xf;
             let reg_value = state.r[dst];
             let mask = (1u64 << (condition + 1)) - 1;
@@ -456,7 +456,7 @@ pub fn execute_instruction(state: &mut MachineState, instr: &Instruction) -> boo
         Cfround => {
             let src = instr.src() as usize;
             let imm = instr.imm() & 3;
-            state.rounding_mode = ((state.r[src] >> imm) & 3) << 22;
+            state.rounding_mode = ((state.r[src] >> imm) & 3) as u32;
         }
 
         Istore => {

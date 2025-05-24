@@ -34,17 +34,19 @@ use crate::RandomXFlags;
 
 use std::ptr::{null, null_mut};
 use std::ffi::c_void;
+use std::cell::UnsafeCell;
+use std::sync::{Mutex, Arc};
 
 /// Trait for RandomX virtual machine implementations
 pub trait VirtualMachine {
     /// Calculate a RandomX hash for the given input
-    fn calculate(&mut self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]>;
+    fn calculate(&self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]>;
     
     /// Calculate a RandomX hash with customization info
-    fn calculate_with_info(&mut self, input: &[u8], info: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]>;
+    fn calculate_with_info(&self, input: &[u8], info: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]>;
     
     /// Calculate hashes for multiple inputs (batch processing)
-    fn calculate_batch(&mut self, inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>> {
+    fn calculate_batch(&self, inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>> {
         let mut results = Vec::with_capacity(inputs.len());
         for input in inputs {
             results.push(self.calculate(input)?);
@@ -53,12 +55,13 @@ pub trait VirtualMachine {
     }
     
     /// Calculate hashes for successive inputs with internal state reuse for better performance
-    fn calculate_successive(&mut self, first_input: &[u8], next_inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>>;
+    fn calculate_successive(&self, first_input: &[u8], next_inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>>;
 }
 
 /// Wrapper around the C RandomX VM implementation
 pub struct RandomXVM {
-    vm_ptr: *mut c_void,
+    vm_ptr: UnsafeCell<*mut c_void>,
+    mutex: Mutex<()>, // For interior mutability and thread safety
 }
 
 // Raw C FFI declarations
@@ -67,29 +70,21 @@ extern "C" {
     fn randomx_vm_set_cache(machine: *mut c_void, cache: *const c_void);
     fn randomx_vm_set_dataset(machine: *mut c_void, dataset: *const c_void);
     fn randomx_destroy_vm(machine: *mut c_void);
-    fn randomx_vm_calculate_hash(
+    fn randomx_calculate_hash(
         machine: *mut c_void,
         input: *const u8,
         input_size: usize,
         output: *mut u8,
     );
-    fn randomx_vm_calculate_hash_first(
+    fn randomx_calculate_hash_first(
         machine: *mut c_void,
         input: *const u8,
         input_size: usize,
     );
-    fn randomx_vm_calculate_hash_next(
+    fn randomx_calculate_hash_next(
         machine: *mut c_void,
         input: *const u8,
         input_size: usize,
-        output: *mut u8,
-    );
-    fn randomx_vm_calculate_hash_with_info(
-        machine: *mut c_void,
-        input: *const u8,
-        input_size: usize,
-        info_data: *const u8,
-        info_size: usize,
         output: *mut u8,
     );
 }
@@ -125,7 +120,10 @@ impl RandomXVM {
             return Err(RandomXError::VmCreationError);
         }
 
-        Ok(Self { vm_ptr })
+        Ok(Self {
+            vm_ptr: UnsafeCell::new(vm_ptr),
+            mutex: Mutex::new(()),
+        })
     }
 
     /// Sets the cache to be used by this virtual machine
@@ -135,15 +133,11 @@ impl RandomXVM {
     ///
     /// # Returns
     /// A Result indicating success or an error
-    pub fn set_cache(&mut self, cache: &Cache) -> Result<()> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    pub fn set_cache(&self, cache: &Cache) -> Result<()> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
 
         unsafe {
-            randomx_vm_set_cache(self.vm_ptr, cache.as_ptr());
+            randomx_vm_set_cache(*self.vm_ptr.get(), cache.as_ptr());
         }
 
         Ok(())
@@ -156,15 +150,11 @@ impl RandomXVM {
     ///
     /// # Returns
     /// A Result indicating success or an error
-    pub fn set_dataset(&mut self, dataset: &Dataset) -> Result<()> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    pub fn set_dataset(&self, dataset: &Dataset) -> Result<()> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
 
         unsafe {
-            randomx_vm_set_dataset(self.vm_ptr, dataset.as_ptr());
+            randomx_vm_set_dataset(*self.vm_ptr.get(), dataset.as_ptr());
         }
 
         Ok(())
@@ -172,21 +162,17 @@ impl RandomXVM {
     
     /// Returns whether this VM is still valid
     pub fn is_valid(&self) -> bool {
-        !self.vm_ptr.is_null()
+        unsafe { !(*self.vm_ptr.get()).is_null() }
     }
     
     /// Calculate hash for the first input in a series
     /// This is used internally for successive calculations
-    fn calculate_first(&mut self, input: &[u8]) -> Result<()> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    fn calculate_first(&self, input: &[u8]) -> Result<()> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
 
         unsafe {
-            randomx_vm_calculate_hash_first(
-                self.vm_ptr,
+            randomx_calculate_hash_first(
+                *self.vm_ptr.get(),
                 input.as_ptr(),
                 input.len(),
             );
@@ -196,18 +182,13 @@ impl RandomXVM {
     }
     
     /// Calculate hash for next inputs after the first in a series
-    fn calculate_next(&mut self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
+    fn calculate_next(&self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
         let mut hash = [0u8; RANDOMX_HASH_SIZE];
         
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
-
         unsafe {
-            randomx_vm_calculate_hash_next(
-                self.vm_ptr,
+            randomx_calculate_hash_next(
+                *self.vm_ptr.get(),
                 input.as_ptr(),
                 input.len(),
                 hash.as_mut_ptr(),
@@ -219,77 +200,101 @@ impl RandomXVM {
 }
 
 impl VirtualMachine for RandomXVM {
-    fn calculate(&mut self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    fn calculate(&self, input: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
         
-        let mut hash = [0u8; RANDOMX_HASH_SIZE];
-
         unsafe {
-            randomx_vm_calculate_hash(
-                self.vm_ptr,
+            if (*self.vm_ptr.get()).is_null() {
+                return Err(RandomXError::InvalidOperation(
+                    "Virtual machine not initialized".to_string(),
+                ));
+            }
+            
+            let mut hash = [0u8; RANDOMX_HASH_SIZE];
+
+            randomx_calculate_hash(
+                *self.vm_ptr.get(),
                 input.as_ptr(),
                 input.len(),
                 hash.as_mut_ptr(),
             );
-        }
 
-        Ok(hash)
+            Ok(hash)
+        }
     }
 
-    fn calculate_with_info(&mut self, input: &[u8], info: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    fn calculate_with_info(&self, input: &[u8], info: &[u8]) -> Result<[u8; RANDOMX_HASH_SIZE]> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
         
-        let mut hash = [0u8; RANDOMX_HASH_SIZE];
-
         unsafe {
-            randomx_vm_calculate_hash_with_info(
-                self.vm_ptr,
-                input.as_ptr(),
-                input.len(),
-                info.as_ptr(),
-                info.len(),
+            if (*self.vm_ptr.get()).is_null() {
+                return Err(RandomXError::InvalidOperation(
+                    "Virtual machine not initialized".to_string(),
+                ));
+            }
+            
+            // Since randomx_calculate_hash_with_info doesn't appear to be available in the C API,
+            // we'll implement our own version by combining the input and info
+            let combined_input = [input, info].concat();
+            let mut hash = [0u8; RANDOMX_HASH_SIZE];
+
+            randomx_calculate_hash(
+                *self.vm_ptr.get(),
+                combined_input.as_ptr(),
+                combined_input.len(),
                 hash.as_mut_ptr(),
             );
-        }
 
-        Ok(hash)
+            Ok(hash)
+        }
     }
     
-    fn calculate_successive(&mut self, first_input: &[u8], next_inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>> {
-        if self.vm_ptr.is_null() {
-            return Err(RandomXError::InvalidOperation(
-                "Virtual machine not initialized".to_string(),
-            ));
-        }
+    fn calculate_successive(&self, first_input: &[u8], next_inputs: &[&[u8]]) -> Result<Vec<[u8; RANDOMX_HASH_SIZE]>> {
+        let _lock = self.mutex.lock().map_err(|_| RandomXError::MutexPoisoning)?;
+        
+        unsafe {
+            if (*self.vm_ptr.get()).is_null() {
+                return Err(RandomXError::InvalidOperation(
+                    "Virtual machine not initialized".to_string(),
+                ));
+            }
 
-        // Calculate the first hash and initialize VM state
-        self.calculate_first(first_input)?;
-        
-        // Calculate subsequent hashes reusing VM state
-        let mut results = Vec::with_capacity(next_inputs.len());
-        for input in next_inputs {
-            results.push(self.calculate_next(input)?);
+            // Calculate the first hash and initialize VM state
+            randomx_calculate_hash_first(
+                *self.vm_ptr.get(),
+                first_input.as_ptr(),
+                first_input.len(),
+            );
+            
+            // Calculate subsequent hashes reusing VM state
+            let mut results = Vec::with_capacity(next_inputs.len());
+            for input in next_inputs {
+                let mut hash = [0u8; RANDOMX_HASH_SIZE];
+                randomx_calculate_hash_next(
+                    *self.vm_ptr.get(),
+                    input.as_ptr(),
+                    input.len(),
+                    hash.as_mut_ptr(),
+                );
+                results.push(hash);
+            }
+            
+            Ok(results)
         }
-        
-        Ok(results)
     }
 }
 
 impl Drop for RandomXVM {
     fn drop(&mut self) {
-        if !self.vm_ptr.is_null() {
+        // Handle mutex lock failure gracefully - we can't use ? in drop
+        let lock_result = self.mutex.lock();
+        if let Ok(_lock) = lock_result {
             unsafe {
-                randomx_destroy_vm(self.vm_ptr);
+                if !(*self.vm_ptr.get()).is_null() {
+                    randomx_destroy_vm(*self.vm_ptr.get());
+                    *self.vm_ptr.get() = null_mut();
+                }
             }
-            self.vm_ptr = null_mut();
         }
     }
 }
