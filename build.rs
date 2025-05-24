@@ -40,14 +40,6 @@ fn main() {
         }
     }
     
-    // Detect CPU features for optimal compilation
-    #[cfg(feature = "hwloc")]
-    {
-        if cfg!(target_os = "linux") || cfg!(target_os = "freebsd") || cfg!(target_os = "macos") {
-            println!("cargo:rustc-link-lib=hwloc");
-        }
-    }
-
     // Compile C/C++ files
     let mut native_sources = vec![
         "src/aes_hash.cpp",
@@ -76,25 +68,35 @@ fn main() {
     // Add platform-specific JIT compiler implementations
     if target.contains("x86_64") {
         native_sources.push("src/jit_compiler_x86.cpp");
+        
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
             
-            // For x86-64 Linux, we can use the precompiled assembly file
+            // For x86-64 Linux, we'll handle the assembly file separately
             println!("cargo:rustc-link-arg=-Wl,--whole-archive");
-            cc_config.asm_flag("-f elf64");
-            cc_config.file("src/jit_compiler_x86_static.S");
+            // Create a separate build for the assembly file only
+            let mut asm_config = cc::Build::new();
+            asm_config
+                .file("src/jit_compiler_x86_static.S")
+                .flag("-fPIC")
+                .include("src");
+            asm_config.compile("randomx_asm");
             println!("cargo:rustc-link-arg=-Wl,--no-whole-archive");
         } else if target.contains("windows") {
             cc_config.define("XMRIG_OS_WIN", "1");
             
             // For Windows, we need to compile the assembly file separately
             if target.contains("msvc") {
-                cc_config.asm_flag("/c");
-                cc_config.file("src/jit_compiler_x86_static.asm");
+                let mut asm_config = cc::Build::new();
+                asm_config.file("src/jit_compiler_x86_static.asm");
+                asm_config.compile("randomx_asm");
             } else {
-                cc_config.asm_flag("-f win64");
-                cc_config.file("src/jit_compiler_x86_static.S");
+                let mut asm_config = cc::Build::new();
+                asm_config
+                    .file("src/jit_compiler_x86_static.S")
+                    .include("src");
+                asm_config.compile("randomx_asm");
             }
         }
     } else if target.contains("aarch64") {
@@ -102,14 +104,28 @@ fn main() {
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
-            cc_config.file("src/jit_compiler_a64_static.S");
+            
+            // Handle AArch64 assembly separately
+            let mut asm_config = cc::Build::new();
+            asm_config
+                .file("src/jit_compiler_a64_static.S")
+                .flag("-fPIC")
+                .include("src");
+            asm_config.compile("randomx_asm");
         }
     } else if target.contains("riscv64") {
         native_sources.push("src/jit_compiler_rv64.cpp");
         if target.contains("linux") || target.contains("freebsd") || target.contains("dragonfly") {
             cc_config.define("XMRIG_OS_UNIX", "1");
             cc_config.flag("-fPIC");
-            cc_config.file("src/jit_compiler_rv64_static.S");
+            
+            // Handle RISC-V assembly separately
+            let mut asm_config = cc::Build::new();
+            asm_config
+                .file("src/jit_compiler_rv64_static.S")
+                .flag("-fPIC")
+                .include("src");
+            asm_config.compile("randomx_asm");
         }
     }
     
@@ -137,7 +153,8 @@ fn main() {
         .generate()
         .expect("Unable to generate bindings");
 
-    let out_path = Path::new(&env::var("OUT_DIR").unwrap());
+    let out_dir = env::var("OUT_DIR").unwrap();
+    let out_path = Path::new(&out_dir);
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");

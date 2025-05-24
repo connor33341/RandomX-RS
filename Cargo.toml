@@ -7,24 +7,40 @@ description = "Rust implementation of RandomX proof-of-work algorithm"
 repository = "https://github.com/connor33341/RandomX-RS"
 license = "BSD-3-Clause"
 readme = "README.md"
+keywords = ["crypto", "cryptocurrency", "pow", "randomx", "monero"]
+categories = ["cryptography", "algorithms"]
+
+[[bin]]
+name = "randomx-rs"
+path = "src/main.rs"
+
+[[bin]]
+name = "randomx-benchmark"
+path = "src/bin/benchmark.rs"
+
+[lib]
+name = "randomx_rs"
+path = "src/lib.rs"
 
 [dependencies]
 libc = "0.2"
+bitflags = "2.0"
 blake2-rfc = "0.2.18"
-rand = "0.8"
 lazy_static = "1.4"
-bitflags = "2.4"
-num-traits = "0.2"
 cfg-if = "1.0"
+hex = "0.4"
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 bindgen = "0.69"
 
-[lib]
-name = "randomx"
-crate-type = ["rlib", "cdylib", "staticlib"]
+[features]
+default = []
+large_pages = []
+hwloc = []
 
-[[bin]]
-name = "randomx-benchmark"
-path = "src/bin/benchmark.rs"
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
