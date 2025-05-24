@@ -34,6 +34,7 @@ use std::ffi::c_void;
 use crate::common::{FpuReg, IntReg, RANDOMX_PROGRAM_SIZE, RANDOMX_PROGRAM_ITERATIONS};
 use crate::instructions::{Instruction, execute_instruction, MachineState};
 use crate::dataset::Dataset;
+use crate::blake2;
 
 /// InterpretedVirtualMachine is a Rust implementation of the RandomX interpreted VM.
 /// This VM executes RandomX bytecode instructions directly without compilation to native code.
@@ -208,14 +209,23 @@ impl InterpretedVirtualMachine {
             return Err("VM not initialized");
         }
 
-        // In the real implementation, we would use Blake2b to hash the VM state
-        // For now, just use a simple hash of register values
-        for i in 0..4 {
-            let r = self.state.r[i];
-            let idx = i * 8;
-            out[idx..idx+8].copy_from_slice(&r.to_le_bytes());
+        // Create a buffer for VM state to hash (registers r and f)
+        let mut state_buffer = Vec::with_capacity(8 * 8 + 8 * 16);
+        
+        // Add integer registers to the buffer
+        for i in 0..8 {
+            state_buffer.extend_from_slice(&self.state.r[i].to_le_bytes());
+        }
+        
+        // Add floating point registers to the buffer
+        for i in 0..8 {
+            state_buffer.extend_from_slice(&self.state.f[i].lo.to_le_bytes());
+            state_buffer.extend_from_slice(&self.state.f[i].hi.to_le_bytes());
         }
 
+        // Use Blake2b to hash the VM state
+        blake2::c_compat::hash(&state_buffer, out);
+        
         Ok(())
     }
 }
