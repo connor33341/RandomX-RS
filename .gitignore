@@ -7,3 +7,8 @@ x64/
 Release/
 Debug/
 build/
+
+
+# Added by cargo
+
+/target

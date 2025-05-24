@@ -1,0 +1,30 @@
+[package]
+name = "randomx-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["connor33341","tevador","SChernykh","hyc"]
+description = "Rust implementation of RandomX proof-of-work algorithm"
+repository = "https://github.com/connor33341/RandomX-RS"
+license = "BSD-3-Clause"
+readme = "README.md"
+
+[dependencies]
+libc = "0.2"
+blake2-rfc = "0.2.18"
+rand = "0.8"
+lazy_static = "1.4"
+bitflags = "2.4"
+num-traits = "0.2"
+cfg-if = "1.0"
+
+[build-dependencies]
+cc = { version = "1.0", features = ["parallel"] }
+bindgen = "0.69"
+
+[lib]
+name = "randomx"
+crate-type = ["rlib", "cdylib", "staticlib"]
+
+[[bin]]
+name = "randomx-benchmark"
+path = "src/bin/benchmark.rs"
