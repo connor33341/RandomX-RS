@@ -27,236 +27,155 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-use cfg_if::cfg_if;
-use std::sync::Arc;
+use std::ffi::c_void;
+use std::ptr;
+use crate::{RandomXFlags, CPU};
 
-use crate::common::RANDOMX_PROGRAM_SIZE;
+// Platform-specific JIT implementations
+#[cfg(target_arch = "x86_64")]
+mod x86_64;
 
-// Define constants based on architecture
-#[cfg(all(target_arch = "x86_64", not(target_os = "macos")))]
-pub const HAVE_COMPILER: bool = true;
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
 
-#[cfg(all(target_arch = "aarch64", not(target_os = "macos")))]
-pub const HAVE_COMPILER: bool = true;
+#[cfg(target_arch = "riscv64")]
+mod riscv64;
 
-#[cfg(all(target_arch = "riscv64", not(target_os = "macos")))]
-pub const HAVE_COMPILER: bool = true;
+/// JIT compiler for RandomX
+pub struct JitCompiler {
+    ptr: *mut c_void,
+}
 
-#[cfg(not(any(
-    all(target_arch = "x86_64", not(target_os = "macos")),
-    all(target_arch = "aarch64", not(target_os = "macos")),
-    all(target_arch = "riscv64", not(target_os = "macos"))
-)))]
-pub const HAVE_COMPILER: bool = false;
-
-// Platform-specific JIT compiler implementations
-cfg_if! {
-    if #[cfg(all(target_arch = "x86_64", not(target_os = "macos")))] {
-        mod x86_64;
-        pub use x86_64::JitCompilerImpl;
-    } else if #[cfg(all(target_arch = "aarch64", not(target_os = "macos")))] {
-        mod aarch64;
-        pub use aarch64::JitCompilerImpl;
-    } else if #[cfg(all(target_arch = "riscv64", not(target_os = "macos")))] {
-        mod riscv64;
-        pub use riscv64::JitCompilerImpl;
-    } else {
-        mod fallback;
-        pub use fallback::JitCompilerImpl;
+impl JitCompiler {
+    /// Create a new JIT compiler
+    pub fn new(flags: RandomXFlags, large_pages: bool, numa: bool) -> Option<Self> {
+        let ptr = match () {
+            #[cfg(target_arch = "x86_64")]
+            () => x86_64::create_jit_compiler(flags, large_pages, numa),
+            
+            #[cfg(target_arch = "aarch64")]
+            () => Self::create_aarch64_jit(flags, large_pages, numa),
+            
+            #[cfg(target_arch = "riscv64")]
+            () => Self::create_riscv64_jit(flags, large_pages, numa),
+            
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+            () => None,
+        };
+        
+        ptr.map(|p| Self { ptr: p })
     }
-}
-
-/// Code buffer used by the JIT compiler
-pub struct CodeBuffer {
-    code: Box<[u8]>,
-    code_pos: usize,
-    rcp_count: i32,
-}
-
-impl CodeBuffer {
-    /// Creates a new code buffer with the specified size
-    pub fn new(size: usize) -> Self {
-        Self {
-            code: vec![0; size].into_boxed_slice(),
-            code_pos: 0,
-            rcp_count: 0,
+    
+    /// Get the raw pointer to the JIT compiler
+    pub fn as_ptr(&self) -> *const c_void {
+        self.ptr
+    }
+    
+    /// Get the raw mutable pointer to the JIT compiler
+    pub fn as_mut_ptr(&mut self) -> *mut c_void {
+        self.ptr
+    }
+    
+    // Platform-specific JIT creation functions
+    
+    #[cfg(target_arch = "aarch64")]
+    fn create_aarch64_jit(flags: RandomXFlags, large_pages: bool, numa: bool) -> Option<*mut c_void> {
+        extern "C" {
+            fn randomx_alloc_jit_compiler_a64(flags: u32, largePages: bool, jitNuma: bool) -> *mut c_void;
         }
-    }
-
-    /// Emits bytes to the code buffer
-    pub fn emit(&mut self, src: &[u8]) {
-        let end = self.code_pos + src.len();
-        if end <= self.code.len() {
-            self.code[self.code_pos..end].copy_from_slice(src);
-            self.code_pos = end;
+        
+        let ptr = unsafe {
+            randomx_alloc_jit_compiler_a64(flags.bits(), large_pages, numa)
+        };
+        
+        if ptr.is_null() {
+            None
         } else {
-            panic!("Code buffer overflow");
+            Some(ptr)
         }
     }
+    
+    #[cfg(target_arch = "riscv64")]
+    fn create_riscv64_jit(flags: RandomXFlags, large_pages: bool, numa: bool) -> Option<*mut c_void> {
+        extern "C" {
+            fn randomx_alloc_jit_compiler_rv64(flags: u32, largePages: bool, jitNuma: bool) -> *mut c_void;
+        }
+        
+        let ptr = unsafe {
+            randomx_alloc_jit_compiler_rv64(flags.bits(), large_pages, numa)
+        };
+        
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr)
+        }
+    }
+    
+    /// Create a VM using this JIT compiler
+    pub fn create_vm(&self, cache: *const c_void, dataset: *const c_void) -> Option<*mut c_void> {
+        match () {
+            #[cfg(target_arch = "x86_64")]
+            () => x86_64::create_vm_with_compiler(self.ptr, cache as *mut c_void, dataset as *mut c_void),
+            
+            #[cfg(target_arch = "aarch64")]
+            () => self.create_vm_aarch64(cache, dataset),
+            
+            #[cfg(target_arch = "riscv64")]
+            () => self.create_vm_riscv64(cache, dataset),
+            
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+            () => None,
+        }
+    }
+    
+    #[cfg(target_arch = "aarch64")]
+    fn create_vm_aarch64(&self, cache: *const c_void, dataset: *const c_void) -> Option<*mut c_void> {
+        extern "C" {
+            fn randomx_create_vm_a64_compiler(jit: *mut c_void, cache: *mut c_void, dataset: *mut c_void) -> *mut c_void;
+        }
+        
+        let ptr = unsafe {
+            randomx_create_vm_a64_compiler(self.ptr, cache as *mut c_void, dataset as *mut c_void)
+        };
+        
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr)
+        }
+    }
+    
+    #[cfg(target_arch = "riscv64")]
+    fn create_vm_riscv64(&self, cache: *const c_void, dataset: *const c_void) -> Option<*mut c_void> {
+        extern "C" {
+            fn randomx_create_vm_rv64_compiler(jit: *mut c_void, cache: *mut c_void, dataset: *mut c_void) -> *mut c_void;
+        }
+        
+        let ptr = unsafe {
+            randomx_create_vm_rv64_compiler(self.ptr, cache as *mut c_void, dataset as *mut c_void)
+        };
+        
+        if ptr.is_null() {
+            None
+        } else {
+            Some(ptr)
+        }
+    }
+}
 
-    /// Emits a single value to the code buffer
-    pub fn emit_value<T: Copy>(&mut self, src: T) {
-        let size = std::mem::size_of::<T>();
-        let end = self.code_pos + size;
-        if end <= self.code.len() {
-            // Safety: We're ensuring proper bounds and T is Copy (plain data)
-            unsafe {
-                let src_ptr = &src as *const T as *const u8;
-                let dst_ptr = self.code.as_mut_ptr().add(self.code_pos);
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
+impl Drop for JitCompiler {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.ptr.is_null() {
+                match () {
+                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
+                    () => x86_64::free_jit_compiler(self.ptr),
+                    
+                    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+                    () => {},
+                }
             }
-            self.code_pos = end;
-        } else {
-            panic!("Code buffer overflow");
-        }
-    }
-
-    /// Emits bytes at a specific position in the code buffer
-    pub fn emit_at(&mut self, pos: usize, src: &[u8]) {
-        let end = pos + src.len();
-        if end <= self.code.len() {
-            self.code[pos..end].copy_from_slice(src);
-        } else {
-            panic!("Code buffer overflow");
-        }
-    }
-
-    /// Emits a single value at a specific position in the code buffer
-    pub fn emit_value_at<T: Copy>(&mut self, pos: usize, src: T) {
-        let size = std::mem::size_of::<T>();
-        let end = pos + size;
-        if end <= self.code.len() {
-            // Safety: We're ensuring proper bounds and T is Copy (plain data)
-            unsafe {
-                let src_ptr = &src as *const T as *const u8;
-                let dst_ptr = self.code.as_mut_ptr().add(pos);
-                std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, size);
-            }
-        } else {
-            panic!("Code buffer overflow");
-        }
-    }
-
-    /// Gets the current position in the code buffer
-    pub fn position(&self) -> usize {
-        self.code_pos
-    }
-
-    /// Gets a reference to the code buffer
-    pub fn code(&self) -> &[u8] {
-        &self.code[..self.code_pos]
-    }
-
-    /// Gets a mutable reference to the code buffer
-    pub fn code_mut(&mut self) -> &mut [u8] {
-        &mut self.code[..self.code_pos]
-    }
-}
-
-/// Compiler state used during JIT compilation
-pub struct CompilerState {
-    pub code_buffer: CodeBuffer,
-    pub instruction_offsets: [i32; RANDOMX_PROGRAM_SIZE],
-    pub register_usage: [i32; 8], // 8 registers in RandomX
-}
-
-impl CompilerState {
-    /// Creates a new compiler state with the specified code buffer size
-    pub fn new(code_size: usize) -> Self {
-        Self {
-            code_buffer: CodeBuffer::new(code_size),
-            instruction_offsets: [0; RANDOMX_PROGRAM_SIZE],
-            register_usage: [0; 8],
-        }
-    }
-}
-
-/// JIT compiler trait that all implementations must support
-pub trait JitCompiler {
-    /// Create a new JIT compiler instance
-    fn new() -> Self where Self: Sized;
-    
-    /// Generate compiled program
-    fn generate_program(&self, program_data: &[u8], configuration: &[u8]);
-    
-    /// Get a pointer to the compiled program function
-    fn get_program_func(&self) -> unsafe extern "C" fn();
-    
-    /// Generate code for the superscalar hash function
-    fn generate_superscalar_hash(&self, program: &[u8], reciprocal_cache: &[u8]);
-    
-    /// Enable writing to the code buffer
-    fn enable_writing(&self);
-    
-    /// Enable execution of the code buffer
-    fn enable_execution(&self);
-    
-    /// Enable both writing and execution of the code buffer
-    fn enable_all(&self);
-}
-
-// For now, we'll use a placeholder implementation that simply forwards
-// calls to the native implementation via FFI
-
-/// Primary JIT compiler implementation
-/// This is either a native Rust implementation or a bridge to the C/C++ code
-#[derive(Clone)]
-pub struct JitCompilerX86 {
-    _private: (),
-}
-
-/// Fallback JIT compiler implementation when no native JIT is available
-#[derive(Clone)]
-pub struct JitCompilerFallback {
-    _private: (),
-}
-
-// Type alias for the appropriate JIT compiler implementation
-cfg_if! {
-    if #[cfg(all(target_arch = "x86_64", not(target_os = "macos")))] {
-        pub type DefaultJitCompiler = JitCompilerX86;
-    } else {
-        pub type DefaultJitCompiler = JitCompilerFallback;
-    }
-}
-
-#[cfg(not(all(target_arch = "x86_64", not(target_os = "macos"))))]
-mod fallback {
-    use super::*;
-    
-    pub struct JitCompilerImpl {}
-    
-    impl JitCompiler for JitCompilerImpl {
-        fn new() -> Self {
-            Self {}
-        }
-        
-        fn generate_program(&self, _program_data: &[u8], _configuration: &[u8]) {
-            // No-op in fallback mode
-        }
-        
-        fn get_program_func(&self) -> unsafe extern "C" fn() {
-            unsafe extern "C" fn dummy() {
-                // This should never be called directly
-                panic!("Attempted to call JIT code in fallback mode");
-            }
-            dummy
-        }
-        
-        fn generate_superscalar_hash(&self, _program: &[u8], _reciprocal_cache: &[u8]) {
-            // No-op in fallback mode
-        }
-        
-        fn enable_writing(&self) {
-            // No-op in fallback mode
-        }
-        
-        fn enable_execution(&self) {
-            // No-op in fallback mode
-        }
-        
-        fn enable_all(&self) {
-            // No-op in fallback mode
         }
     }
 }

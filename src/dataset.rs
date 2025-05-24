@@ -28,103 +28,109 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 use std::ffi::c_void;
-use std::ptr::NonNull;
+use std::mem;
+use std::ptr;
 use std::slice;
 use crate::RANDOMX_DATASET_ITEM_SIZE;
 
-extern "C" {
-    fn randomx_init_cache(cache: *mut c_void, key: *const c_void, key_size: libc::size_t);
-    fn randomx_release_cache(cache: *mut c_void);
-    
-    fn randomx_init_dataset(dataset: *mut c_void, cache: *mut c_void, start_item: libc::c_ulong, item_count: libc::c_ulong);
-    fn randomx_get_dataset_memory(dataset: *mut c_void) -> *mut c_void;
-    fn randomx_release_dataset(dataset: *mut c_void);
-}
-
-/// RandomX Cache wrapper
+/// RandomX cache structure
 pub struct Cache {
-    inner: NonNull<c_void>,
+    inner: *mut c_void,
 }
 
-/// RandomX Dataset wrapper
-pub struct Dataset {
-    inner: NonNull<c_void>,
-}
+unsafe impl Send for Cache {}
+unsafe impl Sync for Cache {}
 
 impl Cache {
-    /// Creates a Cache wrapper from a raw pointer
-    /// 
-    /// # Safety
-    /// 
-    /// This function should only be called with a valid pointer to a RandomX cache
-    /// that was allocated with randomx_alloc_cache
-    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        assert!(!ptr.is_null());
-        Self {
-            inner: NonNull::new_unchecked(ptr),
+    /// Initialize cache with a key
+    pub fn new(flags: super::RandomXFlags, key: &[u8]) -> Option<Self> {
+        extern "C" {
+            fn randomx_alloc_cache(flags: u32) -> *mut c_void;
+            fn randomx_init_cache(cache: *mut c_void, key: *const c_void, keySize: usize);
         }
-    }
-    
-    /// Gets a raw pointer to the underlying cache
-    pub fn as_raw(&self) -> *mut c_void {
-        self.inner.as_ptr()
-    }
-    
-    /// Initializes the cache with the given key
-    pub fn init(&mut self, key: &[u8]) {
+        
+        let ptr = unsafe { randomx_alloc_cache(flags.bits()) };
+        if ptr.is_null() {
+            return None;
+        }
+        
         unsafe {
-            randomx_init_cache(
-                self.inner.as_ptr(),
-                key.as_ptr() as *const c_void,
-                key.len(),
-            );
+            randomx_init_cache(ptr, key.as_ptr() as *const c_void, key.len());
         }
+        
+        Some(Self { inner: ptr })
+    }
+
+    /// Create a Cache from a raw pointer
+    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        Self { inner: ptr }
+    }
+    
+    /// Get the raw pointer to the cache
+    pub fn as_ptr(&self) -> *const c_void {
+        self.inner as *const c_void
     }
 }
 
 impl Drop for Cache {
     fn drop(&mut self) {
-        unsafe {
-            randomx_release_cache(self.inner.as_ptr());
+        extern "C" {
+            fn randomx_release_cache(cache: *mut c_void);
+        }
+        
+        if !self.inner.is_null() {
+            unsafe {
+                randomx_release_cache(self.inner);
+            }
+            self.inner = ptr::null_mut();
         }
     }
 }
 
+/// RandomX dataset structure
+pub struct Dataset {
+    inner: *mut c_void,
+}
+
+unsafe impl Send for Dataset {}
+unsafe impl Sync for Dataset {}
+
 impl Dataset {
-    /// Creates a Dataset wrapper from a raw pointer
-    /// 
-    /// # Safety
-    /// 
-    /// This function should only be called with a valid pointer to a RandomX dataset
-    /// that was allocated with randomx_alloc_dataset
-    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        assert!(!ptr.is_null());
-        Self {
-            inner: NonNull::new_unchecked(ptr),
+    /// Create a new dataset from a cache
+    pub fn new(flags: super::RandomXFlags, cache: &Cache) -> Option<Self> {
+        extern "C" {
+            fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
+            fn randomx_init_dataset(dataset: *mut c_void, cache: *mut c_void, startItem: u64, itemCount: u64);
+            fn randomx_dataset_item_count() -> u64;
         }
-    }
-    
-    /// Gets a raw pointer to the underlying dataset
-    pub fn as_raw(&self) -> *mut c_void {
-        self.inner.as_ptr()
-    }
-    
-    /// Initializes a range of items in the dataset using the provided cache
-    pub fn init(&mut self, cache: &Cache, start_item: u64, item_count: u64) {
+
+        let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
+        if ptr.is_null() {
+            return None;
+        }
+
         unsafe {
-            randomx_init_dataset(
-                self.inner.as_ptr(),
-                cache.as_raw(),
-                start_item,
-                item_count,
-            );
+            let item_count = randomx_dataset_item_count();
+            randomx_init_dataset(ptr, cache.inner, 0, item_count);
         }
+
+        Some(Self { inner: ptr })
+    }
+    
+    /// Create a dataset from a raw pointer
+    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
+        Self { inner: ptr }
+    }
+    
+    /// Get the raw pointer to the dataset
+    pub fn as_ptr(&self) -> *const c_void {
+        self.inner as *const c_void
     }
     
     /// Gets a reference to the dataset's memory buffer
     pub fn memory(&self) -> &[u8] {
         unsafe {
-            let ptr = randomx_get_dataset_memory(self.inner.as_ptr());
+            let ptr = randomx_get_dataset_memory(self.inner);
             let count = crate::dataset_item_count() as usize;
             let size = count * RANDOMX_DATASET_ITEM_SIZE;
             slice::from_raw_parts(ptr as *const u8, size)
@@ -134,7 +140,7 @@ impl Dataset {
     /// Gets a mutable reference to the dataset's memory buffer
     pub fn memory_mut(&mut self) -> &mut [u8] {
         unsafe {
-            let ptr = randomx_get_dataset_memory(self.inner.as_ptr());
+            let ptr = randomx_get_dataset_memory(self.inner);
             let count = crate::dataset_item_count() as usize;
             let size = count * RANDOMX_DATASET_ITEM_SIZE;
             slice::from_raw_parts_mut(ptr as *mut u8, size)
@@ -144,14 +150,15 @@ impl Dataset {
 
 impl Drop for Dataset {
     fn drop(&mut self) {
-        unsafe {
-            randomx_release_dataset(self.inner.as_ptr());
+        extern "C" {
+            fn randomx_release_dataset(dataset: *mut c_void);
+        }
+        
+        if !self.inner.is_null() {
+            unsafe {
+                randomx_release_dataset(self.inner);
+            }
+            self.inner = ptr::null_mut();
         }
     }
 }
-
-// Ensure these types are Send and Sync
-unsafe impl Send for Cache {}
-unsafe impl Sync for Cache {}
-unsafe impl Send for Dataset {}
-unsafe impl Sync for Dataset {}

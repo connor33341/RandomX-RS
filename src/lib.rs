@@ -27,241 +27,216 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-use std::ffi::{c_void, c_ulong};
-use std::ptr::NonNull;
+use std::ffi::{c_void, c_int};
+use std::os::raw::c_char;
+use std::mem;
+use std::ptr;
+use std::slice;
+
 use bitflags::bitflags;
-use libc::{size_t};
 
-// Constants matching the C/C++ implementation
-pub const RANDOMX_HASH_SIZE: usize = 32;
-pub const RANDOMX_DATASET_ITEM_SIZE: usize = 64;
+// Import public interfaces
+pub use crate::cpu::{CPU, has_feature};
+pub use crate::dataset::{Cache, Dataset};
+pub use crate::vm::VirtualMachine;
 
-// Modules
+// Core modules
 mod argon2;
-mod dataset;
-mod vm;
 mod blake2;
 mod common;
 mod cpu;
+mod dataset;
+mod instructions;
 mod jit;
+mod vm;
+mod vm_interpreted;
 
-// Re-exports
-pub use dataset::{Cache, Dataset};
-pub use vm::VirtualMachine;
-
+// RandomX flag constants
 bitflags! {
-    /// Flags to configure RandomX behavior
-    #[repr(C)]
+    /// RandomX algorithm configuration flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct RandomXFlags: u32 {
+        /// Default (no flags)
         const DEFAULT = 0;
-        const LARGE_PAGES = 1;
-        const HARD_AES = 2;
-        const FULL_MEM = 4;
-        const JIT = 8;
-        const SECURE = 16;
-        const ARGON2_SSSE3 = 32;
-        const ARGON2_AVX2 = 64;
-        const ARGON2 = Self::ARGON2_SSSE3.bits() | Self::ARGON2_AVX2.bits();
+        
+        /// Use full-memory mode for higher security (2GB memory usage)
+        const FULL_MEM = 1;
+        
+        /// Use light-memory mode (256MB memory usage)
+        const LIGHT_MEM = 2;
+        
+        /// Use JIT compilation mode for better performance where available
+        const JIT = 4;
+        
+        /// Use large pages if available, for better performance
+        const LARGE_PAGES = 8;
+        
+        /// Use hardware AES acceleration when available (x86 platforms)
+        const HARD_AES = 16;
+        
+        /// For platforms without hardware AES
+        const SOFT_AES = 32;
+        
+        /// Run in "secure" mode (mitigates some side-channel attacks)
+        const SECURE = 64;
+        
+        /// Use NUMA-aware memory allocation on multi-CPU systems
+        const NUMA = 128;
+        
+        /// Disable CPU-specific optimizations
+        const ARGON2_SSSE3 = 256;
+        
+        /// Enable AVX2 optimizations for Argon2
+        const ARGON2_AVX2 = 512;
     }
 }
 
-/// Gets the recommended flags to be used on the current machine.
-/// 
-/// This doesn't include:
-/// - `RANDOMX_FLAG_LARGE_PAGES`
-/// - `RANDOMX_FLAG_FULL_MEM`
-/// - `RANDOMX_FLAG_SECURE`
-/// 
-/// These flags must be added manually if desired.
+impl Default for RandomXFlags {
+    fn default() -> Self {
+        RandomXFlags::DEFAULT
+    }
+}
+
+/// Returns recommended RandomX flags for current CPU architecture
 pub fn get_flags() -> RandomXFlags {
-    // Call into the C implementation for now, we'll replace this with pure Rust later
-    unsafe { randomx_get_flags() }
+    // Get raw flags from native library
+    extern "C" {
+        fn randomx_get_flags() -> u32;
+    }
+    
+    let flags = unsafe { randomx_get_flags() };
+    RandomXFlags::from_bits_truncate(flags)
 }
 
-/// Allocates and initializes a new RandomX cache
-/// 
-/// # Arguments
-/// 
-/// * `flags` - Configuration flags for the cache allocation
-/// 
-/// # Returns
-/// 
-/// A new RandomX cache or None if allocation fails
+/// Returns the number of items in a RandomX dataset
+pub fn dataset_item_count() -> u32 {
+    extern "C" {
+        fn randomx_dataset_item_count() -> u64;
+    }
+    
+    unsafe { randomx_dataset_item_count() as u32 }
+}
+
+/// Allocates a RandomX cache
 pub fn alloc_cache(flags: RandomXFlags) -> Option<Cache> {
-    // For now, this is just a thin wrapper around the C implementation
-    unsafe {
-        let ptr = randomx_alloc_cache(flags.bits());
-        if ptr.is_null() {
-            None
-        } else {
-            Some(Cache::from_raw(ptr))
-        }
+    extern "C" {
+        fn randomx_alloc_cache(flags: u32) -> *mut c_void;
+    }
+    
+    let ptr = unsafe { randomx_alloc_cache(flags.bits()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { Cache::from_raw(ptr) })
     }
 }
 
-/// Allocates and initializes a new RandomX dataset
-/// 
-/// # Arguments
-/// 
-/// * `flags` - Configuration flags for the dataset allocation
-/// 
-/// # Returns
-/// 
-/// A new RandomX dataset or None if allocation fails
+/// Allocates a RandomX dataset
 pub fn alloc_dataset(flags: RandomXFlags) -> Option<Dataset> {
-    // For now, this is just a thin wrapper around the C implementation
-    unsafe {
-        let ptr = randomx_alloc_dataset(flags.bits());
-        if ptr.is_null() {
-            None
-        } else {
-            Some(Dataset::from_raw(ptr))
-        }
+    extern "C" {
+        fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
+    }
+    
+    let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { Dataset::from_raw(ptr) })
     }
 }
 
-/// Gets the number of items contained in the dataset
-pub fn dataset_item_count() -> u64 {
-    unsafe { randomx_dataset_item_count() as u64 }
-}
-
-/// Creates and initializes a RandomX virtual machine
-/// 
-/// # Arguments
-/// 
-/// * `flags` - Configuration flags for the VM
-/// * `cache` - An initialized cache, can be None if FULL_MEM flag is set
-/// * `dataset` - An initialized dataset, can be None if FULL_MEM flag is not set
-/// 
-/// # Returns
-/// 
-/// A new RandomX virtual machine or None if initialization fails
+/// Creates a RandomX virtual machine
 pub fn create_vm(flags: RandomXFlags, cache: Option<&Cache>, dataset: Option<&Dataset>) -> Option<VirtualMachine> {
-    unsafe {
-        let cache_ptr = match cache {
-            Some(c) => c.as_raw(),
-            None => std::ptr::null_mut(),
-        };
-        
-        let dataset_ptr = match dataset {
-            Some(d) => d.as_raw(),
-            None => std::ptr::null_mut(),
-        };
-        
-        let vm_ptr = randomx_create_vm(flags.bits(), cache_ptr, dataset_ptr);
-        if vm_ptr.is_null() {
-            None
-        } else {
-            Some(VirtualMachine::from_raw(vm_ptr))
-        }
+    extern "C" {
+        fn randomx_create_vm(flags: u32, cache: *mut c_void, dataset: *mut c_void) -> *mut c_void;
+    }
+    
+    let cache_ptr = cache.map_or(std::ptr::null_mut(), |c| c.as_ptr() as *mut c_void);
+    let dataset_ptr = dataset.map_or(std::ptr::null_mut(), |d| d.as_ptr() as *mut c_void);
+    
+    let ptr = unsafe { randomx_create_vm(flags.bits(), cache_ptr, dataset_ptr) };
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { VirtualMachine::from_raw(ptr) })
     }
 }
 
 /// Calculate a RandomX hash
-/// 
-/// # Arguments
-/// 
-/// * `vm` - Virtual machine instance
-/// * `input` - Input data to hash
-/// 
-/// # Returns
-/// 
-/// A 32-byte hash
-pub fn calculate_hash(vm: &VirtualMachine, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
-    let mut output = [0u8; RANDOMX_HASH_SIZE];
+pub fn calculate_hash(vm: &VirtualMachine, input: &[u8]) -> [u8; 32] {
+    extern "C" {
+        fn randomx_calculate_hash(vm: *mut c_void, input: *const c_void, input_size: usize, output: *mut u8);
+    }
+    
+    let mut output = [0u8; 32];
     unsafe {
         randomx_calculate_hash(
-            vm.as_raw(),
-            input.as_ptr() as *const c_void,
-            input.len(),
-            output.as_mut_ptr() as *mut c_void
-        );
-    }
-    output
-}
-
-/// Calculate multiple hashes efficiently using multi-part API
-pub mod multi_hash {
-    use super::*;
-    
-    pub fn calculate_first(vm: &VirtualMachine, input: &[u8]) {
-        unsafe {
-            randomx_calculate_hash_first(
-                vm.as_raw(),
-                input.as_ptr() as *const c_void,
-                input.len()
-            );
-        }
-    }
-    
-    pub fn calculate_next(vm: &VirtualMachine, next_input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
-        let mut output = [0u8; RANDOMX_HASH_SIZE];
-        unsafe {
-            randomx_calculate_hash_next(
-                vm.as_raw(),
-                next_input.as_ptr() as *const c_void,
-                next_input.len(),
-                output.as_mut_ptr() as *mut c_void
-            );
-        }
-        output
-    }
-    
-    pub fn calculate_last(vm: &VirtualMachine) -> [u8; RANDOMX_HASH_SIZE] {
-        let mut output = [0u8; RANDOMX_HASH_SIZE];
-        unsafe {
-            randomx_calculate_hash_last(
-                vm.as_raw(),
-                output.as_mut_ptr() as *mut c_void
-            );
-        }
-        output
-    }
-}
-
-/// Calculate a RandomX commitment from a hash and its input
-/// 
-/// # Arguments
-/// 
-/// * `input` - The input data that was hashed
-/// * `hash` - The resulting hash
-/// 
-/// # Returns
-/// 
-/// A 32-byte commitment
-pub fn calculate_commitment(input: &[u8], hash: &[u8; RANDOMX_HASH_SIZE]) -> [u8; RANDOMX_HASH_SIZE] {
-    let mut output = [0u8; RANDOMX_HASH_SIZE];
-    unsafe {
-        randomx_calculate_commitment(
+            vm.as_ptr() as *mut c_void, 
             input.as_ptr() as *const c_void, 
             input.len(),
-            hash.as_ptr() as *const c_void,
-            output.as_mut_ptr() as *mut c_void
+            output.as_mut_ptr()
         );
     }
     output
 }
 
-// Foreign function interface to the C implementation
-// We'll gradually replace these calls with pure Rust implementations
-#[link(name = "randomx")]
-extern "C" {
-    fn randomx_get_flags() -> u32;
-    fn randomx_alloc_cache(flags: u32) -> *mut c_void;
-    fn randomx_init_cache(cache: *mut c_void, key: *const c_void, key_size: size_t);
-    fn randomx_release_cache(cache: *mut c_void);
-    fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
-    fn randomx_dataset_item_count() -> c_ulong;
-    fn randomx_init_dataset(dataset: *mut c_void, cache: *mut c_void, start_item: c_ulong, item_count: c_ulong);
-    fn randomx_get_dataset_memory(dataset: *mut c_void) -> *mut c_void;
-    fn randomx_release_dataset(dataset: *mut c_void);
-    fn randomx_create_vm(flags: u32, cache: *mut c_void, dataset: *mut c_void) -> *mut c_void;
-    fn randomx_vm_set_cache(machine: *mut c_void, cache: *mut c_void);
-    fn randomx_vm_set_dataset(machine: *mut c_void, dataset: *mut c_void);
-    fn randomx_destroy_vm(machine: *mut c_void);
-    fn randomx_calculate_hash(machine: *mut c_void, input: *const c_void, input_size: size_t, output: *mut c_void);
-    fn randomx_calculate_hash_first(machine: *mut c_void, input: *const c_void, input_size: size_t);
-    fn randomx_calculate_hash_next(machine: *mut c_void, next_input: *const c_void, next_input_size: size_t, output: *mut c_void);
-    fn randomx_calculate_hash_last(machine: *mut c_void, output: *mut c_void);
-    fn randomx_calculate_commitment(input: *const c_void, input_size: size_t, hash_in: *const c_void, com_out: *mut c_void);
+/// Calculate multiple RandomX hashes with the same virtual machine
+pub fn calculate_hash_first(vm: &VirtualMachine, input: &[u8]) {
+    extern "C" {
+        fn randomx_calculate_hash_first(vm: *mut c_void, input: *const c_void, input_size: usize);
+    }
+    
+    unsafe {
+        randomx_calculate_hash_first(
+            vm.as_ptr() as *mut c_void, 
+            input.as_ptr() as *const c_void, 
+            input.len()
+        );
+    }
+}
+
+/// Calculate next hash in a chain
+pub fn calculate_hash_next(vm: &VirtualMachine, input: &[u8]) -> [u8; 32] {
+    extern "C" {
+        fn randomx_calculate_hash_next(vm: *mut c_void, input: *const c_void, input_size: usize, output: *mut u8);
+    }
+    
+    let mut output = [0u8; 32];
+    unsafe {
+        randomx_calculate_hash_next(
+            vm.as_ptr() as *mut c_void, 
+            input.as_ptr() as *const c_void, 
+            input.len(),
+            output.as_mut_ptr()
+        );
+    }
+    output
+}
+
+/// Finalize hash calculation
+pub fn calculate_hash_last(vm: &VirtualMachine) -> [u8; 32] {
+    extern "C" {
+        fn randomx_calculate_hash_last(vm: *mut c_void, output: *mut u8);
+    }
+    
+    let mut output = [0u8; 32];
+    unsafe {
+        randomx_calculate_hash_last(vm.as_ptr() as *mut c_void, output.as_mut_ptr());
+    }
+    output
+}
+
+/// Create a new RandomX cache
+pub fn create_cache(flags: RandomXFlags, key: &[u8]) -> Option<Cache> {
+    Cache::new(flags, key)
+}
+
+/// Create a new RandomX dataset
+pub fn create_dataset(flags: RandomXFlags, cache: &Cache) -> Option<Dataset> {
+    Dataset::new(flags, cache)
+}
+
+/// Create a new RandomX virtual machine
+pub fn create_vm(flags: RandomXFlags, cache: &Cache, dataset: Option<&Dataset>) -> Option<RandomXVM> {
+    RandomXVM::new(flags, cache, dataset)
 }
