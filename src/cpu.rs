@@ -27,7 +27,6 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-use cfg_if::cfg_if;
 use lazy_static::lazy_static;
 
 lazy_static! {
@@ -114,15 +113,13 @@ impl Cpu {
     
     #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
     fn detect_aes() -> bool {
-        cfg_if! {
-            if #[cfg(target_arch = "aarch64")] {
-                // On ARM, AES is part of the Crypto Extension
-                // For a proper implementation, we should use getauxval(AT_HWCAP)
-                // But for now, we'll assume false unless we implement the detection
-                false
-            } else {
-                false
-            }
+        if cfg!(target_arch = "aarch64") {
+            // On ARM, AES is part of the Crypto Extension
+            // For a proper implementation, we should use getauxval(AT_HWCAP)
+            // But for now, we'll assume false unless we implement the detection
+            false
+        } else {
+            false
         }
     }
     
@@ -153,7 +150,7 @@ impl Cpu {
         use std::arch::x86_64::*;
         
         unsafe {
-            let max_level = __get_cpuid_max(0, std::ptr::null_mut());
+            let (max_level, _) = __get_cpuid_max(0);
             if max_level >= 7 {
                 let cpuid = __cpuid_count(7, 0);
                 // AVX2: EBX bit 5
@@ -177,7 +174,7 @@ impl Cpu {
         use std::arch::x86_64::*;
         
         unsafe {
-            let max_level = __get_cpuid_max(0, std::ptr::null_mut());
+            let (max_level, _) = __get_cpuid_max(0);
             if max_level >= 7 {
                 let cpuid = __cpuid_count(7, 0);
                 // AVX512F: EBX bit 16
