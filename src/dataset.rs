@@ -28,12 +28,13 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 use std::ffi::c_void;
-use std::mem;
 use std::ptr;
-use std::slice;
-use crate::RANDOMX_DATASET_ITEM_SIZE;
+use std::sync::{Arc, Mutex};
+use std::thread;
 
-/// RandomX cache structure
+use crate::RandomXFlags;
+
+/// RandomX cache structure used for light verification mode
 pub struct Cache {
     inner: *mut c_void,
 }
@@ -42,8 +43,8 @@ unsafe impl Send for Cache {}
 unsafe impl Sync for Cache {}
 
 impl Cache {
-    /// Initialize cache with a key
-    pub fn new(flags: super::RandomXFlags, key: &[u8]) -> Option<Self> {
+    /// Create a new cache with the given flags and key
+    pub fn new(flags: RandomXFlags, key: &[u8]) -> Option<Self> {
         extern "C" {
             fn randomx_alloc_cache(flags: u32) -> *mut c_void;
             fn randomx_init_cache(cache: *mut c_void, key: *const c_void, keySize: usize);
@@ -60,15 +61,15 @@ impl Cache {
         
         Some(Self { inner: ptr })
     }
-
+    
+    /// Get a raw pointer to the native cache
+    pub fn as_ptr(&self) -> *const c_void {
+        self.inner as *const c_void
+    }
+    
     /// Create a Cache from a raw pointer
     pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
         Self { inner: ptr }
-    }
-    
-    /// Get the raw pointer to the cache
-    pub fn as_ptr(&self) -> *const c_void {
-        self.inner as *const c_void
     }
 }
 
@@ -87,7 +88,7 @@ impl Drop for Cache {
     }
 }
 
-/// RandomX dataset structure
+/// RandomX dataset structure used for full verification mode
 pub struct Dataset {
     inner: *mut c_void,
 }
@@ -96,24 +97,21 @@ unsafe impl Send for Dataset {}
 unsafe impl Sync for Dataset {}
 
 impl Dataset {
-    /// Create a new dataset from a cache
-    pub fn new(flags: super::RandomXFlags, cache: &Cache) -> Option<Self> {
+    /// Create a new dataset with the given flags and cache
+    pub fn new(flags: RandomXFlags, cache: &Cache) -> Option<Self> {
         extern "C" {
             fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
-            fn randomx_init_dataset(dataset: *mut c_void, cache: *mut c_void, startItem: u64, itemCount: u64);
-            fn randomx_dataset_item_count() -> u64;
+            fn randomx_dataset_item_count() -> usize;
         }
-
+        
         let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
         if ptr.is_null() {
             return None;
         }
-
-        unsafe {
-            let item_count = randomx_dataset_item_count();
-            randomx_init_dataset(ptr, cache.inner, 0, item_count);
-        }
-
+        
+        // Initialize the dataset (this can be computationally expensive)
+        Self::init_dataset(ptr, cache, 0, unsafe { randomx_dataset_item_count() });
+        
         Some(Self { inner: ptr })
     }
     
@@ -122,29 +120,97 @@ impl Dataset {
         Self { inner: ptr }
     }
     
-    /// Get the raw pointer to the dataset
+    /// Get a raw pointer to the native dataset
     pub fn as_ptr(&self) -> *const c_void {
         self.inner as *const c_void
     }
     
-    /// Gets a reference to the dataset's memory buffer
-    pub fn memory(&self) -> &[u8] {
+    /// Initialize the dataset with multi-threading support
+    pub fn init_parallel(flags: RandomXFlags, cache: &Cache, threads: usize) -> Option<Self> {
+        extern "C" {
+            fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
+            fn randomx_dataset_item_count() -> usize;
+        }
+        
+        let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
+        if ptr.is_null() {
+            return None;
+        }
+        
+        // Use parallel initialization if more than one thread is specified
+        if threads > 1 {
+            let count = unsafe { randomx_dataset_item_count() };
+            let perThread = count / threads;
+            let remainder = count % threads;
+            
+            let cache_arc = Arc::new(cache);
+            let ptr_arc = Arc::new(Mutex::new(ptr));
+            
+            let mut handles = Vec::new();
+            
+            for i in 0..threads {
+                let t_cache = Arc::clone(&cache_arc);
+                let t_ptr = Arc::clone(&ptr_arc);
+                
+                let startItem = i * perThread;
+                let itemCount = if i == threads - 1 {
+                    perThread + remainder
+                } else {
+                    perThread
+                };
+                
+                let handle = thread::spawn(move || {
+                    let locked_ptr = *t_ptr.lock().unwrap();
+                    Self::init_dataset(locked_ptr, &t_cache, startItem, itemCount);
+                });
+                
+                handles.push(handle);
+            }
+            
+            // Wait for all threads to complete
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        } else {
+            // Single-threaded initialization
+            let count = unsafe { randomx_dataset_item_count() };
+            Self::init_dataset(ptr, cache, 0, count);
+        }
+        
+        Some(Self { inner: ptr })
+    }
+    
+    // Initialize a portion of the dataset
+    fn init_dataset(dataset: *mut c_void, cache: &Cache, startItem: usize, itemCount: usize) {
+        extern "C" {
+            fn randomx_init_dataset(dataset: *mut c_void, cache: *const c_void, 
+                                   startItem: usize, itemCount: usize);
+        }
+        
         unsafe {
-            let ptr = randomx_get_dataset_memory(self.inner);
-            let count = crate::dataset_item_count() as usize;
-            let size = count * RANDOMX_DATASET_ITEM_SIZE;
-            slice::from_raw_parts(ptr as *const u8, size)
+            randomx_init_dataset(
+                dataset, 
+                cache.as_ptr(),
+                startItem,
+                itemCount
+            );
         }
     }
     
-    /// Gets a mutable reference to the dataset's memory buffer
-    pub fn memory_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            let ptr = randomx_get_dataset_memory(self.inner);
-            let count = crate::dataset_item_count() as usize;
-            let size = count * RANDOMX_DATASET_ITEM_SIZE;
-            slice::from_raw_parts_mut(ptr as *mut u8, size)
+    /// Get a dataset item
+    pub fn get_item(&self, index: usize) -> [u8; 64] {
+        extern "C" {
+            fn randomx_get_dataset_item(dataset: *const c_void, index: usize) -> *const u8;
         }
+        
+        let mut item = [0u8; 64];
+        
+        unsafe {
+            let ptr = randomx_get_dataset_item(self.inner, index);
+            ptr::copy_nonoverlapping(ptr, item.as_mut_ptr(), 64);
+        }
+        
+        item
     }
 }
 
