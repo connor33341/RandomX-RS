@@ -27,204 +27,120 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-use std::ffi::c_void;
+use crate::common::{RandomXError, Result};
+use crate::RandomXFlags;
+use std::ffi::{c_void, c_uint};
 use std::ptr;
+use std::ptr::null_mut;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::RandomXFlags;
+extern "C" {
+    fn randomx_alloc_cache(flags: c_uint) -> *mut c_void;
+    fn randomx_init_cache(cache: *mut c_void, key: *const c_void, keySize: usize);
+    fn randomx_release_cache(cache: *mut c_void);
+    fn randomx_alloc_dataset(flags: c_uint) -> *mut c_void;
+    fn randomx_dataset_item_count() -> c_uint;
+    fn randomx_init_dataset(dataset: *mut c_void, cache: *mut c_void, startItem: c_uint, itemCount: c_uint);
+    fn randomx_release_dataset(dataset: *mut c_void);
+}
 
 /// RandomX cache structure used for light verification mode
 pub struct Cache {
-    inner: *mut c_void,
+    pub(crate) handle: *mut c_void,
 }
-
-unsafe impl Send for Cache {}
-unsafe impl Sync for Cache {}
 
 impl Cache {
     /// Create a new cache with the given flags and key
-    pub fn new(flags: RandomXFlags, key: &[u8]) -> Option<Self> {
-        extern "C" {
-            fn randomx_alloc_cache(flags: u32) -> *mut c_void;
-            fn randomx_init_cache(cache: *mut c_void, key: *const c_void, keySize: usize);
-        }
-        
-        let ptr = unsafe { randomx_alloc_cache(flags.bits()) };
-        if ptr.is_null() {
-            return None;
+    pub fn new(flags: RandomXFlags, key: &[u8]) -> Result<Self> {
+        let handle = unsafe { randomx_alloc_cache(flags.bits()) };
+        if handle.is_null() {
+            return Err(RandomXError::CacheCreationError);
         }
         
         unsafe {
-            randomx_init_cache(ptr, key.as_ptr() as *const c_void, key.len());
+            randomx_init_cache(handle, key.as_ptr() as *const c_void, key.len());
         }
         
-        Some(Self { inner: ptr })
-    }
-    
-    /// Get a raw pointer to the native cache
-    pub fn as_ptr(&self) -> *const c_void {
-        self.inner as *const c_void
-    }
-    
-    /// Create a Cache from a raw pointer
-    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        Self { inner: ptr }
+        Ok(Cache { handle })
     }
 }
 
 impl Drop for Cache {
     fn drop(&mut self) {
-        extern "C" {
-            fn randomx_release_cache(cache: *mut c_void);
-        }
-        
-        if !self.inner.is_null() {
+        if !self.handle.is_null() {
             unsafe {
-                randomx_release_cache(self.inner);
+                randomx_release_cache(self.handle);
             }
-            self.inner = ptr::null_mut();
         }
     }
 }
+
+// Cache is Send and Sync since the underlying C structure is thread-safe
+// after initialization
+unsafe impl Send for Cache {}
+unsafe impl Sync for Cache {}
 
 /// RandomX dataset structure used for full verification mode
 pub struct Dataset {
-    inner: *mut c_void,
+    pub(crate) handle: *mut c_void,
+    _cache: Option<Arc<Cache>>,  // Keep cache alive as long as the dataset exists
 }
-
-unsafe impl Send for Dataset {}
-unsafe impl Sync for Dataset {}
 
 impl Dataset {
     /// Create a new dataset with the given flags and cache
-    pub fn new(flags: RandomXFlags, cache: &Cache) -> Option<Self> {
-        extern "C" {
-            fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
-            fn randomx_dataset_item_count() -> usize;
+    pub fn new(flags: RandomXFlags, cache: Option<Arc<Cache>>) -> Result<Self> {
+        let handle = unsafe { randomx_alloc_dataset(flags.bits()) };
+        if handle.is_null() {
+            return Err(RandomXError::DatasetCreationError);
         }
         
-        let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
-        if ptr.is_null() {
-            return None;
-        }
-        
-        // Initialize the dataset (this can be computationally expensive)
-        Self::init_dataset(ptr, cache, 0, unsafe { randomx_dataset_item_count() });
-        
-        Some(Self { inner: ptr })
-    }
-    
-    /// Create a dataset from a raw pointer
-    pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        Self { inner: ptr }
-    }
-    
-    /// Get a raw pointer to the native dataset
-    pub fn as_ptr(&self) -> *const c_void {
-        self.inner as *const c_void
-    }
-    
-    /// Initialize the dataset with multi-threading support
-    pub fn init_parallel(flags: RandomXFlags, cache: &Cache, threads: usize) -> Option<Self> {
-        extern "C" {
-            fn randomx_alloc_dataset(flags: u32) -> *mut c_void;
-            fn randomx_dataset_item_count() -> usize;
-        }
-        
-        let ptr = unsafe { randomx_alloc_dataset(flags.bits()) };
-        if ptr.is_null() {
-            return None;
-        }
-        
-        // Use parallel initialization if more than one thread is specified
-        if threads > 1 {
-            let count = unsafe { randomx_dataset_item_count() };
-            let perThread = count / threads;
-            let remainder = count % threads;
-            
-            let cache_arc = Arc::new(cache);
-            let ptr_arc = Arc::new(Mutex::new(ptr));
-            
-            let mut handles = Vec::new();
-            
-            for i in 0..threads {
-                let t_cache = Arc::clone(&cache_arc);
-                let t_ptr = Arc::clone(&ptr_arc);
-                
-                let startItem = i * perThread;
-                let itemCount = if i == threads - 1 {
-                    perThread + remainder
-                } else {
-                    perThread
-                };
-                
-                let handle = thread::spawn(move || {
-                    let locked_ptr = *t_ptr.lock().unwrap();
-                    Self::init_dataset(locked_ptr, &t_cache, startItem, itemCount);
-                });
-                
-                handles.push(handle);
+        // Initialize dataset with cache if provided
+        if let Some(cache) = &cache {
+            let item_count = unsafe { randomx_dataset_item_count() };
+            unsafe {
+                randomx_init_dataset(handle, cache.handle, 0, item_count);
             }
-            
-            // Wait for all threads to complete
-            for handle in handles {
-                handle.join().unwrap();
-            }
-        } else {
-            // Single-threaded initialization
-            let count = unsafe { randomx_dataset_item_count() };
-            Self::init_dataset(ptr, cache, 0, count);
         }
         
-        Some(Self { inner: ptr })
+        Ok(Dataset {
+            handle,
+            _cache: cache,
+        })
     }
     
-    // Initialize a portion of the dataset
-    fn init_dataset(dataset: *mut c_void, cache: &Cache, startItem: usize, itemCount: usize) {
-        extern "C" {
-            fn randomx_init_dataset(dataset: *mut c_void, cache: *const c_void, 
-                                   startItem: usize, itemCount: usize);
+    /// Gets the number of items in a full RandomX dataset
+    pub fn item_count() -> u32 {
+        unsafe { randomx_dataset_item_count() }
+    }
+    
+    /// Initialize a range of dataset items
+    pub fn init_items(&self, cache: &Cache, start_item: u32, item_count: u32) -> Result<()> {
+        if self.handle.is_null() {
+            return Err(RandomXError::InvalidOperation(
+                "Cannot initialize items on an invalid dataset".to_string()
+            ));
         }
         
         unsafe {
-            randomx_init_dataset(
-                dataset, 
-                cache.as_ptr(),
-                startItem,
-                itemCount
-            );
-        }
-    }
-    
-    /// Get a dataset item
-    pub fn get_item(&self, index: usize) -> [u8; 64] {
-        extern "C" {
-            fn randomx_get_dataset_item(dataset: *const c_void, index: usize) -> *const u8;
+            randomx_init_dataset(self.handle, cache.handle, start_item, item_count);
         }
         
-        let mut item = [0u8; 64];
-        
-        unsafe {
-            let ptr = randomx_get_dataset_item(self.inner, index);
-            ptr::copy_nonoverlapping(ptr, item.as_mut_ptr(), 64);
-        }
-        
-        item
+        Ok(())
     }
 }
 
 impl Drop for Dataset {
     fn drop(&mut self) {
-        extern "C" {
-            fn randomx_release_dataset(dataset: *mut c_void);
-        }
-        
-        if !self.inner.is_null() {
+        if !self.handle.is_null() {
             unsafe {
-                randomx_release_dataset(self.inner);
+                randomx_release_dataset(self.handle);
             }
-            self.inner = ptr::null_mut();
         }
     }
 }
+
+// Dataset is Send and Sync since the underlying C structure is thread-safe
+// after initialization
+unsafe impl Send for Dataset {}
+unsafe impl Sync for Dataset {}
