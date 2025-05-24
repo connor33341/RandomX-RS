@@ -30,6 +30,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 use std::ffi::c_void;
 use std::mem::MaybeUninit;
 use blake2_rfc::blake2b::{Blake2b, Blake2bResult};
+use crate::instructions::{Instruction, InstructionType};
 
 // FFI declarations for the C++ Blake2b implementation
 #[repr(C)]
@@ -133,6 +134,75 @@ pub mod c_compat {
             )
         };
         ret == 0
+    }
+}
+
+/// Generates a RandomX program from an input using Blake2b
+pub fn generate_program(input: &[u8], program: &mut [Instruction], config: &mut [u8]) {
+    // Generate raw bytes using Blake2b
+    let mut hasher = Blake2b::new(program.len() * 8 + config.len());
+    hasher.update(input);
+    let result = hasher.finalize();
+    let bytes = result.as_bytes();
+    
+    // Fill config with bytes from the hash
+    let config_start = 0;
+    let config_end = config.len();
+    config.copy_from_slice(&bytes[config_start..config_end]);
+    
+    // Use the remaining bytes to generate instructions
+    for i in 0..program.len() {
+        let offset = config.len() + i * 8;
+        if offset + 8 > bytes.len() {
+            // If we run out of bytes, use a secondary hash
+            let mut secondary_hasher = Blake2b::new(64);
+            secondary_hasher.update(&bytes);
+            secondary_hasher.update(&[i as u8]);
+            let secondary_result = secondary_hasher.finalize();
+            let secondary_bytes = secondary_result.as_bytes();
+            
+            // Extract instruction components from the secondary hash
+            let opcode_byte = secondary_bytes[0] % 30;
+            let dst = secondary_bytes[1] & 0x7;
+            let src = secondary_bytes[2] & 0x7;
+            let mod_byte = secondary_bytes[3];
+            let imm = i32::from_le_bytes([
+                secondary_bytes[4], 
+                secondary_bytes[5], 
+                secondary_bytes[6], 
+                secondary_bytes[7]
+            ]);
+            
+            // Create instruction
+            program[i] = Instruction::new(
+                unsafe { std::mem::transmute(opcode_byte) },
+                dst,
+                src,
+                mod_byte,
+                imm
+            );
+        } else {
+            // Extract instruction components from the primary hash
+            let opcode_byte = bytes[offset] % 30;
+            let dst = bytes[offset + 1] & 0x7;
+            let src = bytes[offset + 2] & 0x7;
+            let mod_byte = bytes[offset + 3];
+            let imm = i32::from_le_bytes([
+                bytes[offset + 4], 
+                bytes[offset + 5], 
+                bytes[offset + 6], 
+                bytes[offset + 7]
+            ]);
+            
+            // Create instruction
+            program[i] = Instruction::new(
+                unsafe { std::mem::transmute(opcode_byte) },
+                dst,
+                src,
+                mod_byte,
+                imm
+            );
+        }
     }
 }
 

@@ -51,6 +51,7 @@ pub mod vm_interpreted;
 
 /// RandomX algorithm flags
 bitflags::bitflags! {
+    #[derive(Clone)]
     pub struct RandomXFlags: u32 {
         /// No flags (default mode)
         const DEFAULT = 0;
@@ -105,11 +106,12 @@ pub fn get_flags() -> RandomXFlags {
 ///
 /// # Parameters
 /// * `flags`: RandomX flags that may affect cache allocation
+/// * `key`: Key to initialize the cache with
 ///
 /// # Returns
 /// A `Result` containing either the allocated `Cache` or an error
-pub fn alloc_cache(flags: RandomXFlags) -> Result<Cache> {
-    Cache::new(flags)
+pub fn alloc_cache(flags: RandomXFlags, key: &[u8]) -> Result<Cache> {
+    Cache::new(flags, key)
 }
 
 /// Returns the count of dataset items.
@@ -130,11 +132,12 @@ pub fn dataset_item_count() -> usize {
 ///
 /// # Parameters
 /// * `flags`: RandomX flags that may affect dataset allocation
+/// * `cache`: Optional cache used to initialize the dataset
 ///
 /// # Returns
 /// A `Result` containing either the allocated `Dataset` or an error
-pub fn alloc_dataset(flags: RandomXFlags) -> Result<Dataset> {
-    Dataset::new(flags)
+pub fn alloc_dataset(flags: RandomXFlags, cache: Option<std::sync::Arc<Cache>>) -> Result<Dataset> {
+    Dataset::new(flags, cache)
 }
 
 /// Creates a RandomX virtual machine instance.
@@ -165,7 +168,7 @@ pub fn create_vm(
 pub fn create_interpreted_vm(
     dataset: Option<&Dataset>,
     mem_size: usize
-) -> Result<impl VirtualMachine> {
+) -> Result<crate::vm_interpreted::InterpretedVirtualMachine> {
     use crate::vm_interpreted::InterpretedVirtualMachine;
     
     let dataset_ptr = dataset.map(|ds| {
@@ -174,7 +177,7 @@ pub fn create_interpreted_vm(
     });
     
     InterpretedVirtualMachine::new(dataset_ptr, mem_size)
-        .map_err(|_| RandomXError::AllocationError)
+        .map_err(|_| RandomXError::SystemError("Memory allocation failed".to_string()))
 }
 
 /// Calculates a RandomX hash using the provided virtual machine.
@@ -185,11 +188,9 @@ pub fn create_interpreted_vm(
 ///
 /// # Returns
 /// A 32-byte hash as an array
-pub fn calculate_hash(vm: &impl VirtualMachine, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
-    unsafe {
-        let mut vm_mut = std::mem::transmute::<&impl VirtualMachine, &mut impl VirtualMachine>(vm);
-        vm_mut.calculate(input)
-    }
+pub fn calculate_hash<T: VirtualMachine>(vm: &T, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
+    // Get a mutable reference safely through interior mutability
+    vm.calculate(input).expect("VM calculation failed")
 }
 
 /// Calculates multiple RandomX hashes using the provided virtual machine.
@@ -200,11 +201,10 @@ pub fn calculate_hash(vm: &impl VirtualMachine, input: &[u8]) -> [u8; RANDOMX_HA
 ///
 /// # Returns
 /// Vector of 32-byte hash arrays
-pub fn calculate_hashes(vm: &impl VirtualMachine, inputs: &[&[u8]]) -> Vec<[u8; RANDOMX_HASH_SIZE]> {
-    unsafe {
-        let mut vm_mut = std::mem::transmute::<&impl VirtualMachine, &mut impl VirtualMachine>(vm);
-        inputs.iter().map(|input| vm_mut.calculate(input)).collect()
-    }
+pub fn calculate_hashes<T: VirtualMachine>(vm: &T, inputs: &[&[u8]]) -> Vec<[u8; RANDOMX_HASH_SIZE]> {
+    inputs.iter()
+        .map(|input| vm.calculate(input).expect("VM calculation failed"))
+        .collect()
 }
 
 /// Calculates a RandomX hash with specified randomization info.
@@ -216,15 +216,12 @@ pub fn calculate_hashes(vm: &impl VirtualMachine, inputs: &[&[u8]]) -> Vec<[u8; 
 ///
 /// # Returns
 /// A 32-byte hash as an array
-pub fn calculate_hash_with_info(
-    vm: &impl VirtualMachine, 
+pub fn calculate_hash_with_info<T: VirtualMachine>(
+    vm: &T, 
     input: &[u8], 
     info: &[u8]
 ) -> [u8; RANDOMX_HASH_SIZE] {
-    unsafe {
-        let mut vm_mut = std::mem::transmute::<&impl VirtualMachine, &mut impl VirtualMachine>(vm);
-        vm_mut.calculate_with_info(input, info)
-    }
+    vm.calculate_with_info(input, info).expect("VM calculation failed")
 }
 
 /// Creates a RandomX hasher for convenient one-off hashing.
@@ -266,15 +263,14 @@ impl RandomXHasher {
     /// A `Result` containing either a `RandomXHasher` or an error
     pub fn new(key: &[u8], flags: RandomXFlags, use_dataset: bool, threads: usize) -> Result<Self> {
         // Initialize cache
-        let cache = Cache::new(flags)?;
-        cache.init(key);
+        let cache = Cache::new(flags.clone(), key)?;
         
         // Initialize dataset if requested
         let dataset = if use_dataset {
             let ds = if threads > 1 {
-                Dataset::init_parallel(flags, &cache, threads)?
+                Dataset::init_parallel(flags.clone(), &cache, threads as u32)?
             } else {
-                Dataset::new(flags, &cache)?
+                Dataset::new(flags.clone(), Some(std::sync::Arc::new(cache.clone())))?
             };
             Some(ds)
         } else {
@@ -303,10 +299,7 @@ impl RandomXHasher {
     /// # Returns
     /// A 32-byte hash as an array
     pub fn hash(&self, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
-        unsafe {
-            let mut vm_mut = std::mem::transmute::<&RandomXVM, &mut RandomXVM>(&self.vm);
-            vm_mut.calculate(input)
-        }
+        self.vm.calculate(input).expect("VM calculation failed")
     }
     
     /// Calculate hash with specific randomization info
@@ -318,9 +311,6 @@ impl RandomXHasher {
     /// # Returns
     /// A 32-byte hash as an array
     pub fn hash_with_info(&self, input: &[u8], info: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
-        unsafe {
-            let mut vm_mut = std::mem::transmute::<&RandomXVM, &mut RandomXVM>(&self.vm);
-            vm_mut.calculate_with_info(input, info)
-        }
+        self.vm.calculate_with_info(input, info).expect("VM calculation failed")
     }
 }
