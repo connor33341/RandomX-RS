@@ -354,37 +354,89 @@ pub fn execute_instruction(state: &mut MachineState, instr: &Instruction) -> boo
         }
 
         Fadd_r => {
-            // FPU operations will be implemented based on the C++ code
-            // For now, we're setting up the structure for the interpreter
-            unimplemented!("Floating point operations not yet implemented")
+            let dst = instr.dst() as usize;
+            let src = instr.src() as usize;
+            state.f[dst] += state.f[src];
         }
 
         Fadd_m => {
-            unimplemented!("Floating point operations not yet implemented")
+            // Calculate memory address
+            let addr = calculate_address(state, instr);
+            let dst = instr.dst() as usize;
+            
+            // Bounds check
+            if (addr as usize) < state.mem_size {
+                // Safety: We've checked that addr is within bounds
+                let value = unsafe {
+                    let ptr = state.scratchpad.add(addr as usize) as *const FpuReg;
+                    *ptr
+                };
+                state.f[dst] += value;
+            }
         }
 
         Fsub_r => {
-            unimplemented!("Floating point operations not yet implemented")
+            let dst = instr.dst() as usize;
+            let src = instr.src() as usize;
+            state.f[dst] -= state.f[src];
         }
 
         Fsub_m => {
-            unimplemented!("Floating point operations not yet implemented")
+            // Calculate memory address
+            let addr = calculate_address(state, instr);
+            let dst = instr.dst() as usize;
+            
+            // Bounds check
+            if (addr as usize) < state.mem_size {
+                // Safety: We've checked that addr is within bounds
+                let value = unsafe {
+                    let ptr = state.scratchpad.add(addr as usize) as *const FpuReg;
+                    *ptr
+                };
+                state.f[dst] -= value;
+            }
         }
 
         Fscal_r => {
-            unimplemented!("Floating point operations not yet implemented")
+            // Apply the scaling factor to the destination register
+            // The scaling factor is a constant: 0.99999999999999999
+            let dst = instr.dst() as usize;
+            let scale_factor: f64 = 0.9999999999999999;
+            state.f[dst] *= scale_factor;
         }
 
         Fmul_r => {
-            unimplemented!("Floating point operations not yet implemented")
+            let dst = instr.dst() as usize;
+            let src = instr.src() as usize;
+            state.f[dst] *= state.f[src];
         }
 
         Fdiv_m => {
-            unimplemented!("Floating point operations not yet implemented")
+            // Calculate memory address
+            let addr = calculate_address(state, instr);
+            let dst = instr.dst() as usize;
+            
+            // Bounds check
+            if (addr as usize) < state.mem_size {
+                // Safety: We've checked that addr is within bounds
+                let value = unsafe {
+                    let ptr = state.scratchpad.add(addr as usize) as *const FpuReg;
+                    *ptr
+                };
+                
+                // Avoid division by zero
+                if value != 0.0 {
+                    state.f[dst] /= value;
+                }
+            }
         }
 
         Fsqrt_r => {
-            unimplemented!("Floating point operations not yet implemented")
+            let dst = instr.dst() as usize;
+            // Ensure we're taking square root of a non-negative number
+            if state.f[dst] >= 0.0 {
+                state.f[dst] = state.f[dst].sqrt();
+            }
         }
 
         Cbranch => {
