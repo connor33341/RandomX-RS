@@ -28,67 +28,131 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 use std::ffi::c_void;
-use std::ptr::NonNull;
-use crate::dataset::{Cache, Dataset};
+use std::ptr;
+use crate::{Cache, Dataset, RandomXFlags, RANDOMX_HASH_SIZE};
+use crate::vm_interpreted::InterpretedVirtualMachine;
 
-extern "C" {
-    fn randomx_vm_set_cache(machine: *mut c_void, cache: *mut c_void);
-    fn randomx_vm_set_dataset(machine: *mut c_void, dataset: *mut c_void);
-    fn randomx_destroy_vm(machine: *mut c_void);
+/// Abstract VM interface
+pub trait VirtualMachine {
+    /// Initialize the VM with a dataset
+    fn initialize_dataset(&mut self, dataset: &Dataset) -> bool;
+    
+    /// Initialize the VM with a cache
+    fn initialize_cache(&mut self, cache: &Cache) -> bool;
+    
+    /// Set the current randomization info
+    fn set_randomization_info(&mut self, info: &[u8]) -> bool;
+    
+    /// Calculate the hash of the input data
+    fn calculate(&mut self, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE];
+    
+    /// Calculate the hash with another randomization info
+    fn calculate_with_info(&mut self, input: &[u8], info: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
+        self.set_randomization_info(info);
+        self.calculate(input)
+    }
 }
 
-/// RandomX Virtual Machine wrapper
-pub struct VirtualMachine {
-    inner: NonNull<c_void>,
+/// C VM instance wrapper
+pub struct RandomXVM {
+    inner: *mut c_void,
 }
 
-impl VirtualMachine {
-    /// Creates a VirtualMachine wrapper from a raw pointer
-    ///
-    /// # Safety
-    ///
-    /// This function should only be called with a valid pointer to a RandomX VM
-    /// that was allocated with randomx_create_vm
+unsafe impl Send for RandomXVM {}
+unsafe impl Sync for RandomXVM {}
+
+impl RandomXVM {
+    /// Create a new VM with the given flags, cache, and optionally dataset
+    pub fn new(flags: RandomXFlags, cache: &Cache, dataset: Option<&Dataset>) -> Option<Self> {
+        extern "C" {
+            fn randomx_create_vm(flags: u32, cache: *mut c_void, dataset: *mut c_void) -> *mut c_void;
+        }
+        
+        let dataset_ptr = match dataset {
+            Some(ds) => ds.as_ptr() as *mut c_void,
+            None => ptr::null_mut(),
+        };
+        
+        let ptr = unsafe {
+            randomx_create_vm(flags.bits(), cache.as_ptr() as *mut c_void, dataset_ptr)
+        };
+        
+        if ptr.is_null() {
+            return None;
+        }
+        
+        Some(Self { inner: ptr })
+    }
+    
+    /// Create a VM from a raw pointer
     pub unsafe fn from_raw(ptr: *mut c_void) -> Self {
-        assert!(!ptr.is_null());
-        Self {
-            inner: NonNull::new_unchecked(ptr),
-        }
-    }
-
-    /// Gets a raw pointer to the underlying virtual machine
-    pub fn as_raw(&self) -> *mut c_void {
-        self.inner.as_ptr()
-    }
-
-    /// Sets a new cache for the VM
-    ///
-    /// This should be called when the cache is reinitialized with a new key.
-    /// This function is only valid for VMs created without RANDOMX_FLAG_FULL_MEM.
-    pub fn set_cache(&mut self, cache: &Cache) {
-        unsafe {
-            randomx_vm_set_cache(self.inner.as_ptr(), cache.as_raw());
-        }
-    }
-
-    /// Sets a new dataset for the VM
-    ///
-    /// This function is only valid for VMs created with RANDOMX_FLAG_FULL_MEM.
-    pub fn set_dataset(&mut self, dataset: &Dataset) {
-        unsafe {
-            randomx_vm_set_dataset(self.inner.as_ptr(), dataset.as_raw());
-        }
+        Self { inner: ptr }
     }
 }
 
-impl Drop for VirtualMachine {
+impl VirtualMachine for RandomXVM {
+    fn initialize_dataset(&mut self, dataset: &Dataset) -> bool {
+        extern "C" {
+            fn randomx_vm_set_dataset(machine: *mut c_void, dataset: *const c_void) -> bool;
+        }
+        
+        unsafe {
+            randomx_vm_set_dataset(self.inner, dataset.as_ptr())
+        }
+    }
+    
+    fn initialize_cache(&mut self, cache: &Cache) -> bool {
+        extern "C" {
+            fn randomx_vm_set_cache(machine: *mut c_void, cache: *const c_void) -> bool;
+        }
+        
+        unsafe {
+            randomx_vm_set_cache(self.inner, cache.as_ptr())
+        }
+    }
+    
+    fn set_randomization_info(&mut self, info: &[u8]) -> bool {
+        extern "C" {
+            fn randomx_vm_set_ext_arg(machine: *mut c_void, info: *const u8, infoSize: usize) -> bool;
+        }
+        
+        unsafe {
+            randomx_vm_set_ext_arg(self.inner, info.as_ptr(), info.len())
+        }
+    }
+    
+    fn calculate(&mut self, input: &[u8]) -> [u8; RANDOMX_HASH_SIZE] {
+        extern "C" {
+            fn randomx_calculate_hash(machine: *mut c_void, input: *const c_void, 
+                                      inputSize: usize, output: *mut u8);
+        }
+        
+        let mut hash = [0u8; RANDOMX_HASH_SIZE];
+        
+        unsafe {
+            randomx_calculate_hash(
+                self.inner, 
+                input.as_ptr() as *const c_void,
+                input.len(),
+                hash.as_mut_ptr()
+            );
+        }
+        
+        hash
+    }
+}
+
+impl Drop for RandomXVM {
     fn drop(&mut self) {
-        unsafe {
-            randomx_destroy_vm(self.inner.as_ptr());
+        extern "C" {
+            fn randomx_destroy_vm(machine: *mut c_void);
+        }
+        
+        if !self.inner.is_null() {
+            unsafe {
+                randomx_destroy_vm(self.inner);
+            }
+            self.inner = ptr::null_mut();
         }
     }
 }
-
-// Ensure VirtualMachine is Send and Sync
-unsafe impl Send for VirtualMachine {}
-unsafe impl Sync for VirtualMachine {}

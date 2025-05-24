@@ -54,6 +54,7 @@ pub type Addr = u32;
 pub type IntReg = u64;
 
 // Floating point register type
+#[derive(Copy, Clone)]
 #[repr(C)]
 pub struct FpuReg {
     pub lo: u64,
