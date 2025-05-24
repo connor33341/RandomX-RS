@@ -18,19 +18,6 @@ Full specification is available in [specs.md](doc/specs.md).
 
 Design description and analysis is available in [design.md](doc/design.md).
 
-## Audits
-
-Between May and August 2019, RandomX was audited by 4 independent security research teams:
-
-* [Trail of Bits](https://www.trailofbits.com/) (28 000 USD)
-* [X41 D-SEC](https://www.x41-dsec.de/) (42 000 EUR)
-* [Kudelski Security](https://www.kudelskisecurity.com/) (18 250 CHF)
-* [QuarksLab](https://quarkslab.com/en/) (52 800 USD)
-
-The first audit was generously funded by [Arweave](https://www.arweave.org/), one of the early adopters of RandomX. The remaining three audits were funded by donations from the [Monero community](https://ccs.getmonero.org/proposals/RandomX-audit.html). All four audits were coordinated by [OSTIF](https://ostif.org/).
-
-Final reports from all four audits are available in the [audits](audits/) directory. None of the audits found any critical vulnerabilities, but several changes in the algorithm and the code were made as a direct result of the audits. More details can be found in the [final report by OSTIF](https://ostif.org/four-audits-of-randomx-for-monero-and-arweave-have-been-completed-results/).
-
 ## Build
 
 RandomX is written in C++11 and builds a static library with a C API provided by header file [randomx.h](src/randomx.h). Minimal API usage example is provided in [api-example1.c](src/tests/api-example1.c). The reference code includes a `randomx-benchmark` and `randomx-tests` executables for testing.
@@ -41,7 +28,7 @@ Build dependencies: `cmake` (minimum 3.5) and `gcc` (minimum version 4.8, but ve
 
 To build optimized binaries for your machine, run:
 ```
-git clone https://github.com/tevador/RandomX.git
+git clone https://github.com/connor33341/RandomX-RS.git
 cd RandomX
 mkdir build && cd build
 cmake -DARCH=native ..
@@ -56,7 +43,7 @@ On Windows, it is possible to build using MinGW (same procedure as on Linux) or 
 
 ### Precompiled binaries
 
-Precompiled `randomx-benchmark` binaries are available on the [Releases page](https://github.com/tevador/RandomX/releases).
+Precompiled `randomx-benchmark` binaries are available on the [Releases page](https://github.com/connor33341/RandomX-RS/releases).
 
 ## Proof of work
 
@@ -113,7 +100,7 @@ Most Intel and AMD CPUs made since 2011 should be fairly efficient at RandomX. M
 
 ### Does RandomX facilitate botnets/malware mining or web mining?
 
-Due to the way the algorithm works, mining malware is much easier to detect. [RandomX Sniffer](https://github.com/tevador/randomx-sniffer) is a proof of concept tool that can detect illicit mining activity on Windows.
+Due to the way the algorithm works, mining malware is much easier to detect. [RandomX Sniffer](https://github.com/connor33341/RandomX-RS-sniffer) is a proof of concept tool that can detect illicit mining activity on Windows.
 
 Efficient mining requires more than 2 GiB of memory, which also disqualifies many low-end machines such as IoT devices, which are often parts of large botnets.
 
@@ -139,9 +126,10 @@ Sufficiently large FPGAs can mine RandomX in a [soft microprocessor](https://en.
 
 ## Acknowledgements
 * [tevador](https://github.com/tevador) - author
+* [connor33341](https://github.com/connor33341) - developer of rust implementation
 * [SChernykh](https://github.com/SChernykh) - contributed significantly to the design of RandomX
 * [hyc](https://github.com/hyc) - original idea of using random code execution for PoW
-* [Other contributors](https://github.com/tevador/RandomX/graphs/contributors)
+* [Other contributors](https://github.com/connor33341/RandomX-RS/graphs/contributors)
 
 RandomX uses some source code from the following 3rd party repositories:
 * Argon2d, Blake2b hashing functions: https://github.com/P-H-C/phc-winner-argon2
