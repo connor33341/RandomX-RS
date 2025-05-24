@@ -53,12 +53,24 @@ pub type Addr = u32;
 // Integer register type
 pub type IntReg = u64;
 
-// Floating point register type
-#[derive(Copy, Clone)]
+/// FPU register (mantissa only) type
+#[derive(Debug, Clone, Copy, Default)]
 #[repr(C)]
 pub struct FpuReg {
     pub lo: u64,
     pub hi: u64,
+}
+
+impl FpuReg {
+    /// Create a new FPU register with specified low and high 64-bit values
+    pub const fn new(lo: u64, hi: u64) -> Self {
+        Self { lo, hi }
+    }
+    
+    /// Create a new FPU register with zero value
+    pub const fn zero() -> Self {
+        Self { lo: 0, hi: 0 }
+    }
 }
 
 // Scratchpad constants
@@ -87,3 +99,35 @@ pub const STORE_L3_CONDITION: u32 = 14;
 
 // Register count
 pub const REGISTER_COUNT: usize = 8;
+
+/// Calculate memory address from machine register state
+pub fn calculate_address(reg: IntReg, offset: IntReg) -> Addr {
+    ((reg & 0x1FFFFFFF8) + offset) & 0x1FFFFFFF8 as u64
+}
+
+/// Register mask helpers
+pub mod reg_mask {
+    pub const R0: usize = 0;
+    pub const R1: usize = 1;
+    pub const R2: usize = 2;
+    pub const R3: usize = 3;
+    pub const R4: usize = 4;
+    pub const R5: usize = 5;
+    pub const R6: usize = 6;
+    pub const R7: usize = 7;
+    
+    pub const F0: usize = 0;
+    pub const F1: usize = 1;
+    pub const F2: usize = 2;
+    pub const F3: usize = 3;
+    pub const F4: usize = 4;
+    pub const F5: usize = 5;
+    pub const F6: usize = 6;
+    pub const F7: usize = 7;
+    
+    pub const E0: usize = 8;
+    pub const A0: usize = 8;
+    pub const A1: usize = 9;
+    pub const A2: usize = 10;
+    pub const A3: usize = 11;
+}
